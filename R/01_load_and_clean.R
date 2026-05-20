@@ -1,0 +1,175 @@
+# Replace library
+library(dplyr)
+library(tidyr)
+library(readr)
+library(stringr)
+library(ggplot2)
+library(purrr)
+library(lubridate)
+library(janitor)
+library(scales)
+
+#--- Load all CSVs ---
+
+alo_files <- list.files(
+    path = "data/raw",
+    pattern = "ALO\\.csv$",
+    full.names = TRUE
+)
+
+#File Preview
+message("Found ", length(alo_files), " files:")
+print(basename(alo_files))
+
+#Read and Stack All Files
+particl_raw <- map_dfr(alo_files, function(file) {
+    read_csv(file, skip = 1, show_col_types = FALSE) %>%
+        mutate(source_file = basename(file))
+})
+
+#--- Clean Column names ---
+particl_clean <- particl_raw %>%
+    clean_names() %>%
+    mutate(
+        sales_revenue = as.numeric(sales_revenue),
+        sales_volume = as.numeric(sales_volume),
+        avg_current_price = as.numeric(avg_current_price),
+        avg_discount = as.numeric(avg_discount),
+        sell_through_rate = as.numeric(sell_through_rate),
+        rate_sold = as.numeric(rate_sold),
+        avg_rating = as.numeric(avg_rating),
+        review_count = as.numeric(review_count),
+        matched_variant_count = as.numeric(matched_variant_count),
+        total_variant_count = as.numeric(total_variant_count),
+        sell_through_pct = round(sell_through_rate * 100, 2),
+        avg_disoucnt_pct = case_when(
+            avg_discount <= 1 ~ round(avg_discount * 100, 2),
+            TRUE ~ round(avg_discount, 2)
+        ),
+
+#Parse Release Date
+product_first_seen = as.Date(product_first_seen),
+
+#Revenue to USD
+revenue_fmt = scales::dollar(sales_revenue)
+    )
+
+# --- Extract Colors from Title ---
+
+particl_clean <- particl_clean %>%
+    mutate(
+        extracted_color = str_trim(
+            str_extract(product_title, "(?<= - )[^-]+$")
+        ),
+        primary_color = str_trim(
+            str_extract(extracted_color, "^[^/]+")
+        ),
+        is_combo_color = str_detect(extracted_color, "/"),
+        particl_color_tag = str_remove(source_file, "ALO\\.csv$")
+    )
+
+# ── Map colors to tone groups ---
+assign_tone <- function(color) {
+  color <- str_to_lower(color)
+  case_when(
+    str_detect(color, "black|onyx|carbon|noir|shadow|slate|caviar")
+      ~ "Dark Neutrals",
+    str_detect(color, "white|ivory|cream|snow|chalk|bone|vanilla|oatmeal|eggshell")
+      ~ "Light Neutrals",
+    str_detect(color, "brown|tan|camel|espresso|latte|mocha|sand|clay|taupe|nude|beige|cacao|toffee")
+      ~ "Earth Tones",
+    str_detect(color, "grey|gray|silver|ash|smoke|fog|stone|pebble|cement")
+      ~ "Greys",
+    str_detect(color, "blue|navy|cobalt|azure|denim|sky|ocean|teal|aqua|cerulean|indigo|sapphire")
+      ~ "Blues",
+    str_detect(color, "green|olive|sage|moss|forest|mint|emerald|khaki|army|hunter|jade")
+      ~ "Greens",
+    str_detect(color, "pink|blush|rose|mauve|fuchsia|coral|flamingo|petal|ballet")
+      ~ "Pinks",
+    str_detect(color, "red|burgundy|wine|cherry|crimson|scarlet|maroon|berry")
+      ~ "Reds",
+    str_detect(color, "purple|lavender|lilac|violet|plum|grape|amethyst|orchid")
+      ~ "Purples",
+    str_detect(color, "yellow|gold|mustard|lemon|amber|honey|butter|sunshine")
+      ~ "Yellows/Golds",
+    str_detect(color, "orange|rust|terracotta|peach|apricot|sienna|papaya")
+      ~ "Oranges/Warm",
+    TRUE ~ "Other"
+  )
+}
+
+particl_clean <- particl_clean %>%
+  mutate(
+    tone_group = assign_tone(primary_color),
+    # Also assign tone to the full combo color as a fallback
+    tone_group = if_else(
+      tone_group == "Other",
+      assign_tone(extracted_color),
+      tone_group
+    )
+  )
+
+# Check how many landed in "Other" - ideally should be low
+particl_clean %>%
+  count(tone_group, sort = TRUE) %>%
+  print()
+
+# --- Add season based on release date ---
+particl_clean <- particl_clean %>%
+  mutate(
+    release_month  = month(product_first_seen),
+    release_year   = year(product_first_seen),
+    release_season = case_when(
+      release_month %in% c(12, 1, 2)  ~ "Winter",
+      release_month %in% c(3, 4, 5)   ~ "Spring",
+      release_month %in% c(6, 7, 8)   ~ "Summer",
+      release_month %in% c(9, 10, 11) ~ "Fall",
+      TRUE ~ "Unknown"
+    ),
+
+    # Add price tier
+    price_tier = case_when(
+      avg_current_price < 60   ~ "Budget (under $60)",
+      avg_current_price < 100  ~ "Mid ($60-$100)",
+      avg_current_price >= 100 ~ "Premium ($100+)",
+      TRUE ~ "Unknown"
+    ),
+
+    # Add category inferred from product title
+    category = case_when(
+      str_detect(str_to_lower(product_title), "legging")               ~ "Leggings",
+      str_detect(str_to_lower(product_title), "bra|bralette")          ~ "Sports Bras",
+      str_detect(str_to_lower(product_title), "short")                 ~ "Shorts",
+      str_detect(str_to_lower(product_title), "tank|tee|top|shirt")    ~ "Tops",
+      str_detect(str_to_lower(product_title), "jacket|hoodie|fleece|sweatshirt|coat") ~ "Outerwear",
+      str_detect(str_to_lower(product_title), "pant|jogger|trouser")   ~ "Pants",
+      str_detect(str_to_lower(product_title), "dress|skirt")           ~ "Dress & Skirts",
+      str_detect(str_to_lower(product_title), "bodysuit")              ~ "Bodysuits",
+      TRUE ~ "Other"
+    )
+  )
+
+# --- Saved Cleaned Data ---
+write_csv(particl_clean), "data/processed/particl_all_colors_clean.csv")
+message("Saved cleaned data: ", nrow(particl_clean), " rows")
+
+# --- Summary Stats ---
+cat("\n--- Rows per color tag ---\n")
+particl_clean %>% count(particl_color_tag, sort = TRUE) %>% print()
+
+cat("\n--- Tone group distribution ---\n")
+particl_clean %>% count(tone_group, sort = TRUE) %>% print()
+
+cat("\n--- Season distribution ---\n")
+particl_clean %>% count(release_season, sort = TRUE) %>% print()
+
+cat("\n--- Category distribution ---\n")
+particl_clean %>% count(category, sort = TRUE) %>% print()
+
+cat("\n--- Sample of extracted colors ---\n")
+particl_clean %>%
+  select(product_title, extracted_color, primary_color, 
+         tone_group, particl_color_tag) %>%
+  head(20) %>%
+  print()
+  

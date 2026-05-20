@@ -1,0 +1,86 @@
+library(gtrendsR)
+library(dplyr)
+library(readr)
+library(lubridate)
+
+# --- Search Terms: Alo Yoga + Color ---
+
+batch_1 <- c(
+    "Alo Yoga black",
+    "Alo Yoga white",
+    "Alo Yoga brown",
+    "Alo Yoga grey",
+    "Alo Yoga blue"
+)
+
+batch_2 <- c(
+    "Alo Yoga green",
+    "Alo Yoga pink",
+    "Alo Yoga red",
+    "Alo Yoga yellow",
+    "Alo Yoga purple"
+)
+
+batch_3 <- c(
+    "Alo Yoga orange",
+    "Alo Yoga" # baseline interest
+)
+
+# --- Pull and Clean One Batch ---
+
+pull_trends <- function(keywords, batch_name) {
+    message("Pulling batch: ", batch_name)
+    Sys.sleep(3) # Delay to prevent overload
+
+    result <- tryCatch(
+        gtrends(
+            keyword = keywords,
+            geo = "US",
+            time = "today+5-y"
+        ),
+        error = function(e) {
+            message("Error on batch ", batch_name, ": "$message)
+            return(NULL)
+        }
+    )
+
+if (is.null(result)) return(NULL)
+
+result$interest_over_time %>%
+    as_tibble() %>%
+    transmute(
+        week_start = as.Date(date),
+        keyword = keyword,
+        interest = as.integer(ifelse(hits == "<1", 0, hits)),
+        month = month(week_start, label = TRUE),
+        year = year(week_start),
+        season = case_when(
+            month(week_start) %in% c(12, 1, 2) ~ "Winter",
+            month(week_start) %in% c(3, 4, 5) ~ "Spring",
+            month(week_start) %in% c(6, 7, 8) ~ "Summer",
+            month(week_start) %in% c(9, 10, 11) ~ "Fall"
+        )
+    )
+}
+
+# --- Pull all Batches ---
+trends_1 <- pull_trends(batch_1, "batch_1")
+trends_2 <- pull_trends(batch_2, "batch_2")
+trends_3 <- pull_trends(batch_3, "batch_3")
+
+# --- Combine Batches ---
+trends_all <- bind_rows(trends_1, trends_2, trends_3)
+
+message("Total trend rows: ", nrow(trends_all))
+
+# --- Preview Seasonal Avgs ---
+trends_all %>%
+    group_by(keyword, season) %>%
+    summarize(avg_interest = round(mean(interest), 1), .groups = "drop") %>%
+    arrange(keyword, season) %>%
+    print(n =50)
+
+# --- Save ---
+write_csv(trends_all, "data/processed/google_trends_clean.csv")
+message("✅ Saved google_trends_clean.csv")
+
